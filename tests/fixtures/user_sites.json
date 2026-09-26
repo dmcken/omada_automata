@@ -1,0 +1,13 @@
+{
+    "errorCode": 0,
+    "msg": "Success.",
+    "result": {
+        "currentPage": 1,
+        "currentSize": 100,
+        "totalRows": 2,
+        "data": [
+            {"favorite": false, "id": "aaaaaaaaaaaaaaaaaaaaaaaa", "name": "Test Site One", "overrides": []},
+            {"favorite": false, "id": "bbbbbbbbbbbbbbbbbbbbbbbb", "name": "Test Site Two", "overrides": []}
+        ]
+    }
+}

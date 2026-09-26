@@ -1,0 +1,13 @@
+{
+    "errorCode": 0,
+    "msg": "OK",
+    "result": {
+        "apiUrl": {
+            "redirectUrl": "https://use1-omada-cloud.tplinkcloud.com",
+            "omada": "https://use1-api-omada-controller.tplinkcloud.com",
+            "vms": "https://use1-vms-api.tplinkcloud.com",
+            "central": "https://use1-api-omada-central.tplinkcloud.com",
+            "essential": "https://use1-api-omada-essential-controller.tplinkcloud.com"
+        }
+    }
+}

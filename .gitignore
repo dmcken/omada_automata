@@ -1,3 +1,7 @@
+# HAR captures - these routinely contain plaintext credentials/session
+# tokens from whatever login was captured. Never commit one.
+*.har
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

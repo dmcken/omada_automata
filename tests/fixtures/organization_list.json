@@ -1,0 +1,27 @@
+{
+    "errorCode": 0,
+    "msg": "OK",
+    "result": {
+        "totalRows": 1,
+        "currentPage": 1,
+        "currentSize": 100,
+        "data": [
+            {
+                "orgId": "0000000000000000000000000000000",
+                "type": 0,
+                "regionType": 1,
+                "name": "Test Organization",
+                "favorite": false,
+                "mspMode": false,
+                "category": "free",
+                "centralEnable": true,
+                "networkEnable": true,
+                "surveillanceEnable": true,
+                "siteNum": 2,
+                "role": 1,
+                "isNewOrg": true,
+                "embedWeb": true
+            }
+        ]
+    }
+}

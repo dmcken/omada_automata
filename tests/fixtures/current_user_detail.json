@@ -1,0 +1,31 @@
+{
+    "errorCode": 0,
+    "msg": "Success.",
+    "result": {
+        "alert": false,
+        "email": "test.user@example.com",
+        "id": "000000000000000000000000",
+        "incidentNotification": false,
+        "language": 1,
+        "name": "test.user@example.com",
+        "roleId": "super_admin_id",
+        "roleName": "Super Admin",
+        "showExpirationWarning": false,
+        "sitePrivilege": {
+            "all": true,
+            "serviceType": 1,
+            "sites": ["aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb"]
+        },
+        "sitePrivileges": [
+            {
+                "all": true,
+                "serviceType": 1,
+                "sites": ["aaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbb"]
+            }
+        ],
+        "supportAddUser": true,
+        "type": 1,
+        "use24hour": false,
+        "userLevel": 0
+    }
+}
