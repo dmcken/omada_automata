@@ -1,10 +1,13 @@
 '''Tests for OmadaCloudAccount - the unified-ID SSO login chain and
 Cloud Manager (account/organization) endpoints.'''
 import pytest
+import requests
 
 from omada_automata import exceptions
 from omada_automata.account import (
     OmadaCloudAccount,
+    _cookies_from_list,
+    _cookies_to_list,
     _guess_cloud_manager_base,
     _parse_redirect_fragment,
 )
@@ -20,6 +23,21 @@ class TestGuessCloudManagerBase:
     def test_unrecognized_host_raises(self):
         with pytest.raises(exceptions.AccountUnavailable):
             _guess_cloud_manager_base('https://not-the-expected-shape.example.com')
+
+
+class TestCookieSerialization:
+    def test_round_trip_preserves_domain_and_path(self):
+        '''dict_from_cookiejar/cookiejar_from_dict would silently drop
+        this - the whole point of these helpers is that a cookie set
+        for one subdomain still gets sent to the others after a
+        save/restore round trip.'''
+        jar = requests.cookies.RequestsCookieJar()
+        jar.set('session', 'abc123', domain='.tplinkcloud.com', path='/', secure=True)
+
+        restored = _cookies_from_list(_cookies_to_list(jar))
+
+        cookie = restored.get('session', domain='.tplinkcloud.com')
+        assert cookie == 'abc123'
 
 
 class TestParseRedirectFragment:
@@ -80,6 +98,8 @@ class TestLogin:
         assert account.account_id == '12345'
         assert account._csrf_token == 'fake-csrf-token'
         assert account._cloud_manager_base == 'https://use1-api-omada-cloud-manager.tplinkcloud.com'
+        assert account._id_service_url == 'https://use1-api-id.tplinkcloud.com'
+        assert account._email == 'test.user@example.com'
 
     def test_sends_credentials_in_login_body(self, requests_mock):
         _mock_login_chain(requests_mock)
@@ -116,10 +136,9 @@ class TestLogin:
             account.login('test.user@example.com', 'fake-password')
 
     def test_connection_error_raises_account_unavailable(self, requests_mock):
-        import requests as requests_lib
         requests_mock.post(
             'https://h2api-id.tplinkcloud.com/api/v1/login',
-            exc=requests_lib.exceptions.ConnectionError,
+            exc=requests.exceptions.ConnectionError,
         )
         account = OmadaCloudAccount()
 
@@ -135,6 +154,8 @@ class _LoggedInAccount(OmadaCloudAccount):
         super().__init__()
         self._csrf_token = 'fake-csrf-token'
         self._cloud_manager_base = 'https://use1-api-omada-cloud-manager.tplinkcloud.com'
+        self._id_service_url = 'https://use1-api-id.tplinkcloud.com'
+        self._email = 'test.user@example.com'
         self.account_id = '12345'
 
 
@@ -229,3 +250,115 @@ class TestEnvelopeErrors:
 
         with pytest.raises(exceptions.ApiError):
             account.get_account_detail()
+
+
+class TestLogout:
+    def test_success_sends_email_and_client_id_then_clears_state(self, requests_mock):
+        requests_mock.post(
+            'https://use1-api-id.tplinkcloud.com/logout',
+            json={'errorCode': 0, 'message': 'OK'},
+        )
+        account = _LoggedInAccount()
+
+        account.logout()
+
+        sent = requests_mock.request_history[0].json()
+        assert sent == {'email': 'test.user@example.com', 'clientId': 'omada-cloud-portal'}
+        assert account._csrf_token is None
+        assert account._cloud_manager_base is None
+        assert account._id_service_url is None
+        assert account._email is None
+        assert account.account_id is None
+
+    def test_not_logged_in_raises_account_unavailable(self, requests_mock):
+        account = OmadaCloudAccount()
+
+        with pytest.raises(exceptions.AccountUnavailable):
+            account.logout()
+
+    def test_failed_logout_leaves_state_intact(self, requests_mock):
+        requests_mock.post(
+            'https://use1-api-id.tplinkcloud.com/logout',
+            json={'errorCode': -1, 'message': 'boom'},
+        )
+        account = _LoggedInAccount()
+
+        with pytest.raises(exceptions.ApiError):
+            account.logout()
+
+        assert account._csrf_token == 'fake-csrf-token'
+
+    def test_connection_error_raises_account_unavailable(self, requests_mock):
+        requests_mock.post(
+            'https://use1-api-id.tplinkcloud.com/logout',
+            exc=requests.exceptions.ConnectionError,
+        )
+        account = _LoggedInAccount()
+
+        with pytest.raises(exceptions.AccountUnavailable):
+            account.logout()
+
+
+class TestIsLoggedIn:
+    def test_never_logged_in_returns_false_without_a_request(self, requests_mock):
+        account = OmadaCloudAccount()
+
+        assert account.is_logged_in() is False
+        assert len(requests_mock.request_history) == 0
+
+    def test_valid_session_returns_true(self, requests_mock):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-manager.tplinkcloud.com/api/v1/central/account/login-status',
+            json={'errorCode': 0, 'msg': 'OK', 'result': {'login': True}},
+        )
+        account = _LoggedInAccount()
+
+        assert account.is_logged_in() is True
+
+    def test_expired_session_returns_false(self, requests_mock):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-manager.tplinkcloud.com/api/v1/central/account/login-status',
+            json={'errorCode': 0, 'msg': 'OK', 'result': {'login': False}},
+        )
+        account = _LoggedInAccount()
+
+        assert account.is_logged_in() is False
+
+    def test_unreachable_service_returns_false_not_raise(self, requests_mock):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-manager.tplinkcloud.com/api/v1/central/account/login-status',
+            exc=requests.exceptions.ConnectionError,
+        )
+        account = _LoggedInAccount()
+
+        assert account.is_logged_in() is False
+
+
+class TestSessionState:
+    def test_round_trips_through_a_fresh_account(self, requests_mock):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-manager.tplinkcloud.com/api/v1/central/account/login-status',
+            json={'errorCode': 0, 'msg': 'OK', 'result': {'login': True}},
+        )
+        original = _LoggedInAccount()
+        original._session.cookies.set('some-cookie', 'some-value', domain='tplinkcloud.com')
+
+        state = original.get_session_state()
+
+        restored = OmadaCloudAccount()
+        restored.restore_session_state(state)
+
+        assert restored._csrf_token == 'fake-csrf-token'
+        assert restored._cloud_manager_base == 'https://use1-api-omada-cloud-manager.tplinkcloud.com'
+        assert restored._id_service_url == 'https://use1-api-id.tplinkcloud.com'
+        assert restored._email == 'test.user@example.com'
+        assert restored.account_id == '12345'
+        restored_cookie = restored._session.cookies.get('some-cookie', domain='tplinkcloud.com')
+        assert restored_cookie == 'some-value'
+        assert restored.is_logged_in() is True
+
+    def test_state_is_json_serializable(self):
+        import json
+        account = _LoggedInAccount()
+
+        json.dumps(account.get_session_state())  # must not raise

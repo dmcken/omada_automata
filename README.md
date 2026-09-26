@@ -8,7 +8,10 @@ hosted controller - sites, devices, clients, alerts.
 
 - `OmadaCloudAccount` - unified-ID SSO login (email/password), plus
   Cloud Manager account/organization data (organization list,
-  per-organization API hosts).
+  per-organization API hosts). Also covers logout, and session caching
+  (`get_session_state()`/`restore_session_state()`/`is_logged_in()`) so
+  a repeatedly-invoked caller (a monitoring job run on a schedule) can
+  skip the full login chain on every run.
 - `EssentialController` - one organization's Essential Controller -
   sites, devices, clients, alert counts, dashboard overview. Obtained
   via `OmadaCloudAccount.essential_controller(org_id)`.
@@ -60,19 +63,41 @@ for site in controller.get_sites():
     devices = controller.get_devices(site.site_id)  # raw dict, shape unconfirmed
 ```
 
+Caching a session across repeated runs (e.g. a monitoring job invoked
+by cron, where logging in from scratch every time would be wasteful):
+```python
+account = omada_automata.OmadaCloudAccount()
+
+cached_state = load_from_wherever_you_store_it()  # your own storage, not this package's concern
+if cached_state:
+    account.restore_session_state(cached_state)
+
+if not account.is_logged_in():
+    account.login('you@example.com', 'your-password')
+    save_to_wherever_you_store_it(account.get_session_state())
+
+# ... use account/controller as normal ...
+
+account.logout()  # only when you actually want to end the session
+```
+
 [examples/walkthrough.py](examples/walkthrough.py) exercises every
-fetch method currently in the package - login, account/organization
-data, then sites/devices/clients/alerts/dashboard for each site -
-against a real account, reading credentials from `examples/.env`
-rather than hardcoding them:
+fetch method currently in the package - login (with the session-cache
+pattern above, cached to `examples/.omada_session.json`),
+account/organization data, then sites/devices/clients/alerts/dashboard
+for each site - against a real account, reading credentials from
+`examples/.env` rather than hardcoding them:
 
 ```sh
 cp examples/.env.example examples/.env   # then fill in OMADA_EMAIL/OMADA_PASSWORD
 uv sync --group examples
-uv run python examples/walkthrough.py
+uv run python examples/walkthrough.py           # logs in, or reuses the cached session
+uv run python examples/walkthrough.py --logout  # logs out and removes the cache
 ```
 
 `examples/.env` is gitignored (matches the repo-wide `.env` rule) -
 never commit real credentials. `OMADA_ORG_ID`/`OMADA_SITE_ID` in that
 file are optional - leave them blank to use the first organization/all
-sites the account has access to.
+sites the account has access to. `examples/.omada_session.json` is
+also gitignored - it holds a live session cookie/CSRF token, which is
+as sensitive as a password.

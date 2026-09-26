@@ -51,6 +51,21 @@ organization, two sites, no MFA on the account). Auth flow, all under
 No MFA/2FA step was present in the captured login. An account with
 MFA enabled will hit a different flow that hasn't been observed - this
 module doesn't attempt to handle it.
+
+Logout - confirmed live, also under the regional unified-ID host from
+step 1:
+
+    POST {serviceUrl}/logout {"email", "clientId": "omada-cloud-portal"}
+    -> {"errorCode": 0, "message": "OK"} (no "result" key at all).
+
+Session caching: repeating the full 3-step login chain on every
+process invocation (e.g. a monitoring job run every few minutes by
+cron) is wasteful and adds load to TP-Link's identity service for no
+benefit. get_session_state()/restore_session_state() let a caller
+persist the session (cookies + CSRF token + derived hosts) between
+process runs however they like (file, cache, env var - this module
+doesn't pick for you) and skip login() entirely as long as
+is_logged_in() still says the restored session is valid.
 '''
 from __future__ import annotations
 
@@ -94,6 +109,42 @@ def _parse_redirect_fragment(location: str) -> dict[str, str]:
     return dict(urllib.parse.parse_qsl(query))
 
 
+def _cookies_to_list(jar: requests.cookies.RequestsCookieJar) -> list[dict]:
+    '''Serialize a cookie jar preserving domain/path/secure/expires -
+    plain `requests.utils.dict_from_cookiejar` flattens to just
+    name->value, which would silently break this SSO flow's
+    domain-scoped cookies once restored (they need to be sent back to
+    several different *.tplinkcloud.com subdomains, not just whichever
+    host happened to set them).
+    '''
+    return [
+        {
+            'name': cookie.name,
+            'value': cookie.value,
+            'domain': cookie.domain,
+            'path': cookie.path,
+            'secure': cookie.secure,
+            'expires': cookie.expires,
+        }
+        for cookie in jar
+    ]
+
+
+def _cookies_from_list(items: list[dict]) -> requests.cookies.RequestsCookieJar:
+    '''Inverse of _cookies_to_list().'''
+    jar = requests.cookies.RequestsCookieJar()
+    for item in items:
+        jar.set(
+            item['name'],
+            item['value'],
+            domain=item.get('domain', ''),
+            path=item.get('path', '/'),
+            secure=item.get('secure', False),
+            expires=item.get('expires'),
+        )
+    return jar
+
+
 def _parse_organization(data: dict) -> models.Organization:
     return models.Organization(
         org_id=data['orgId'],
@@ -120,6 +171,8 @@ class OmadaCloudAccount:
         self._session = requests.Session()
         self._csrf_token: str | None = None
         self._cloud_manager_base: str | None = None
+        self._id_service_url: str | None = None
+        self._email: str | None = None
         self.account_id: str | None = None
 
     def _headers(self) -> dict:
@@ -216,6 +269,99 @@ class OmadaCloudAccount:
         result = _envelope.unwrap(resp, 'login-with-uid-code')
         self._csrf_token = result['csrfToken']
         self._cloud_manager_base = result.get('regionUrl', cloud_manager_base)
+        self._id_service_url = service_url
+        self._email = email
+
+    def logout(self) -> None:
+        '''Log out of TP-Link Omada Cloud (POST {id_service_url}/logout)
+        and clear this object's local session state, so it can't be
+        mistaken for still being logged in afterwards - a subsequent
+        is_logged_in() returns False without making a request, and any
+        EssentialController obtained before logout() shares this same
+        session/CSRF token, so it stops working too.
+
+        Raises:
+            exceptions.AccountUnavailable: Not currently logged in (no
+                point logging out of nothing), or the identity service
+                couldn't be reached.
+            exceptions.ApiError: The logout call itself failed.
+        '''
+        if not self._id_service_url or not self._email:
+            raise exceptions.AccountUnavailable("Not logged in - nothing to log out of")
+
+        try:
+            resp = self._session.post(
+                f"{self._id_service_url}/logout",
+                json={'email': self._email, 'clientId': 'omada-cloud-portal'},
+                timeout=self._timeout,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
+            raise exceptions.AccountUnavailable("Could not reach the identity service") from exc
+
+        _envelope.unwrap(resp, 'logout')
+
+        self._session = requests.Session()
+        self._csrf_token = None
+        self._cloud_manager_base = None
+        self._id_service_url = None
+        self._email = None
+        self.account_id = None
+
+    def is_logged_in(self) -> bool:
+        '''Cheap check for whether this account's current session
+        (freshly logged in, or restored via restore_session_state()) is
+        still valid - hits Cloud Manager's own login-status endpoint,
+        which reports {"login": false} rather than erroring once a
+        session has expired server-side, instead of just assuming a
+        restored session is good because it deserialized cleanly.
+
+        Returns:
+            bool: False if login() was never called (or logout() was),
+                the session has expired, or the identity service can't
+                be reached at all - True otherwise.
+        '''
+        if not self._cloud_manager_base:
+            return False
+        try:
+            result = self._get('/api/v1/central/account/login-status')
+        except (exceptions.ApiError, requests.exceptions.RequestException):
+            return False
+        return bool(result.get('login', False))
+
+    def get_session_state(self) -> dict:
+        '''Serializable snapshot of this account's session - cookies
+        plus the bits login() derives (CSRF token, regional hosts,
+        account id, email). Pass to restore_session_state() on a fresh
+        OmadaCloudAccount to skip repeating the full SSO login chain
+        across process runs (e.g. a monitoring job invoked on a
+        schedule) - see the module docstring for the caching pattern
+        this supports. Storage is entirely up to the caller (file,
+        cache, secrets manager, ...); this only produces/consumes a
+        plain JSON-serializable dict.
+        '''
+        return {
+            'cookies': _cookies_to_list(self._session.cookies),
+            'csrf_token': self._csrf_token,
+            'cloud_manager_base': self._cloud_manager_base,
+            'id_service_url': self._id_service_url,
+            'account_id': self.account_id,
+            'email': self._email,
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        '''Restore a session captured by get_session_state(), on a
+        fresh (not yet logged in) OmadaCloudAccount. Does not itself
+        verify the session is still valid server-side - call
+        is_logged_in() afterwards and fall back to login() if it
+        returns False (the session cookies/CSRF token can simply have
+        expired since the state was captured).
+        '''
+        self._session.cookies.update(_cookies_from_list(state.get('cookies', [])))
+        self._csrf_token = state.get('csrf_token')
+        self._cloud_manager_base = state.get('cloud_manager_base')
+        self._id_service_url = state.get('id_service_url')
+        self.account_id = state.get('account_id')
+        self._email = state.get('email')
 
     def get_account_detail(self) -> dict:
         '''Raw account/detail - username/nickname/email/accountId/region.'''

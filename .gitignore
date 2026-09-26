@@ -2,6 +2,10 @@
 # tokens from whatever login was captured. Never commit one.
 *.har
 
+# Cached OmadaCloudAccount session state (examples/walkthrough.py) -
+# as sensitive as a live login cookie, since that's exactly what it is.
+examples/.omada_session.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
