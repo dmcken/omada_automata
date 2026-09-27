@@ -178,6 +178,142 @@ class TestLogin:
             account.login('test.user@example.com', 'fake-password')
 
 
+def _mfa_required_body():
+    '''Real shape confirmed live against a TOTP-enabled account.'''
+    return {
+        'errorCode': -20677,
+        'message': 'MFA feature enabled',
+        'result': {
+            'supportedMFATypes': [3],
+            'primaryMFAType': 3,
+            'MFAEmail': 'test.user@example.com',
+            'MFAProcessId': 'fake-process-id',
+        },
+    }
+
+
+class TestMfa:
+    def test_login_raises_mfa_required_with_details(self, requests_mock):
+        requests_mock.get(
+            'https://api-id.tplinkcloud.com/oauth/authorize',
+            status_code=302,
+            headers={'Location': 'https://id.tplinkcloud.com/#/login?session_code=fake-session-code'},
+        )
+        requests_mock.post(
+            'https://h2api-id.tplinkcloud.com/api/v1/login',
+            json=_mfa_required_body(),
+        )
+        account = OmadaCloudAccount()
+
+        with pytest.raises(exceptions.MfaRequired) as exc_info:
+            account.login('test.user@example.com', 'fake-password')
+
+        assert exc_info.value.mfa_type == 3
+        assert exc_info.value.supported_mfa_types == [3]
+        assert exc_info.value.email == 'test.user@example.com'
+
+    def test_verify_mfa_without_pending_login_raises(self, requests_mock):
+        account = OmadaCloudAccount()
+
+        with pytest.raises(exceptions.AccountUnavailable):
+            account.verify_mfa('123456')
+
+    def test_verify_mfa_completes_login_with_merged_fields(self, requests_mock):
+        requests_mock.get(
+            'https://api-id.tplinkcloud.com/oauth/authorize',
+            status_code=302,
+            headers={'Location': 'https://id.tplinkcloud.com/#/login?session_code=fake-session-code'},
+        )
+        requests_mock.post(
+            'https://h2api-id.tplinkcloud.com/api/v1/login',
+            [
+                {'json': _mfa_required_body()},
+                {'json': {
+                    'errorCode': 0,
+                    'message': 'OK',
+                    'result': {
+                        'redirectParams': (
+                            'responseType=code&clientId=omada-cloud-portal&state=wee6ki'
+                        ),
+                        'accountId': '12345',
+                        'serviceUrl': 'https://use1-api-id.tplinkcloud.com',
+                    },
+                }},
+            ],
+        )
+        requests_mock.get(
+            'https://use1-api-id.tplinkcloud.com/oauth/authorize',
+            status_code=302,
+            headers={
+                'Location': (
+                    'https://use1-omada-cloud.tplinkcloud.com/#/loginRedirect'
+                    '?code=JEZbXk&state=wee6ki&serviceUrl=https%3A%2F%2Fuse1-api-id.tplinkcloud.com'
+                ),
+            },
+        )
+        requests_mock.post(
+            'https://use1-api-omada-cloud-manager.tplinkcloud.com/api/v1/central/account/login-with-uid-code',
+            json={
+                'errorCode': 0,
+                'msg': 'OK',
+                'result': {
+                    'csrfToken': 'fake-csrf-token',
+                    'regionUrl': 'https://use1-api-omada-cloud-manager.tplinkcloud.com',
+                    'redirectUrl': 'https://use1-omada-cloud.tplinkcloud.com',
+                },
+            },
+        )
+        account = OmadaCloudAccount()
+        with pytest.raises(exceptions.MfaRequired):
+            account.login('test.user@example.com', 'fake-password')
+
+        account.verify_mfa('123456')
+
+        assert account._csrf_token == 'fake-csrf-token'
+        assert account._email == 'test.user@example.com'
+        assert account._pending_mfa is None
+
+        login_requests = [
+            r for r in requests_mock.request_history
+            if r.url == 'https://h2api-id.tplinkcloud.com/api/v1/login'
+        ]
+        assert len(login_requests) == 2
+        second = login_requests[1].json()
+        assert second['needMfa'] is True
+        assert second['mfaType'] == 3
+        assert second['code'] == '123456'
+        assert second['mfaProcessId'] == 'fake-process-id'
+        # the original credentials are still part of the merged body
+        assert second['email'] == 'test.user@example.com'
+        assert second['password'] == 'fake-password'
+
+    def test_rejected_code_raises_login_failed_and_keeps_pending_state(self, requests_mock):
+        '''Pending MFA state survives a wrong code, so a caller can
+        retry verify_mfa() with a fresh code without re-calling
+        login() (unconfirmed whether the real server actually allows a
+        retry against the same mfaProcessId - kept permissive here).'''
+        requests_mock.get(
+            'https://api-id.tplinkcloud.com/oauth/authorize',
+            status_code=302,
+            headers={'Location': 'https://id.tplinkcloud.com/#/login?session_code=fake-session-code'},
+        )
+        requests_mock.post(
+            'https://h2api-id.tplinkcloud.com/api/v1/login',
+            [
+                {'json': _mfa_required_body()},
+                {'json': {'errorCode': 1, 'message': 'invalid code'}},
+            ],
+        )
+        account = OmadaCloudAccount()
+        with pytest.raises(exceptions.MfaRequired):
+            account.login('test.user@example.com', 'fake-password')
+
+        with pytest.raises(exceptions.LoginFailed):
+            account.verify_mfa('000000')
+
+        assert account._pending_mfa is not None
+
+
 class _LoggedInAccount(OmadaCloudAccount):
     '''Test helper: an account that's already past login(), so tests
     for the Cloud Manager methods don't have to re-run the whole SSO

@@ -72,9 +72,31 @@ organization, two sites, no MFA on the account). Auth flow, all under
    Once login-with-uid-code succeeds, its response's `regionUrl` is the
    authoritative value and is what every subsequent call actually uses.
 
-No MFA/2FA step was present in the captured login. An account with
-MFA enabled will hit a different flow that hasn't been observed - this
-module doesn't attempt to handle it.
+MFA/2FA: not present in the originally captured login, but confirmed
+live afterward against a real account with TOTP (authenticator app)
+2FA enabled. Step 1's login POST responds the same way at the HTTP
+level (200, JSON envelope) but with errorCode -20677 ("MFA feature
+enabled") and a `result` of {"supportedMFATypes", "primaryMFAType",
+"MFAEmail", "MFAProcessId"} instead of the usual accountId/serviceUrl/
+redirectParams - login() raises exceptions.MfaRequired carrying this.
+MFAEmail is present even though this account's primary (and only
+configured) method is TOTP, not email - it looks like an
+always-present account-level field rather than a signal of which
+method is active, so it isn't reliable for choosing a method.
+
+MFA verification is NOT a separate endpoint - reverse-engineered from
+the login page's own JS bundle (id.tplinkcloud.com/js/index-*.js,
+captured in the same HAR): it's the *exact same* step 1 login POST
+(same URL, same session_code header, same email/password/terminalUUID/
+privatePolicyChecked body), just with three extra body fields merged
+in: {"needMfa": true, "mfaType": <primaryMFAType>, "code": <the 6-digit
+code>, "mfaProcessId": <MFAProcessId from the MFA-required response>}.
+On success this responds exactly like a normal step-1 success
+(accountId/serviceUrl/redirectParams) and steps 2-3 proceed unchanged.
+verify_mfa(code) does this, using state login() stashed from the
+MFA-required response - the caller only needs to supply the code.
+Confirmed live end-to-end for mfaType 3 (TOTP); other types are
+unconfirmed (see exceptions.MfaRequired).
 
 Logout - confirmed live, also under the regional unified-ID host from
 step 1:
@@ -108,6 +130,8 @@ _GLOBAL_ID_BASE = 'https://h2api-id.tplinkcloud.com'
 _GLOBAL_OAUTH_AUTHORIZE_URL = 'https://api-id.tplinkcloud.com/oauth/authorize'
 _DEFAULT_REDIRECT_URI = 'https://use1-omada-cloud.tplinkcloud.com/#/loginRedirect'
 _REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
+_MFA_REQUIRED_ERROR_CODE = -20677
+MFA_TYPE_TOTP = 3
 
 
 def _guess_cloud_manager_base(service_url: str) -> str:
@@ -199,6 +223,7 @@ class OmadaCloudAccount:
         self._cloud_manager_base: str | None = None
         self._id_service_url: str | None = None
         self._email: str | None = None
+        self._pending_mfa: dict | None = None
         self.account_id: str | None = None
 
     def _headers(self) -> dict:
@@ -225,17 +250,9 @@ class OmadaCloudAccount:
         )
         return _envelope.unwrap(resp, path)
 
-    def login(self, email: str, password: str) -> None:
-        '''Log in with the full unified-ID SSO chain described in the
-        module docstring. On success, this account can call every
-        Cloud Manager method below and mint EssentialController
-        instances via essential_controller().
-
-        Raises:
-            exceptions.LoginFailed: Credentials rejected.
-            exceptions.AccountUnavailable: Couldn't reach the identity
-                service, or the SSO hand-off didn't behave as captured
-                (e.g. no redirect where one was expected).
+    def _begin_oauth_session(self) -> str:
+        '''Step 0 - GET the global oauth/authorize endpoint and return
+        the session_code from its redirect. See the module docstring.
         '''
         try:
             resp = self._session.get(
@@ -261,16 +278,19 @@ class OmadaCloudAccount:
             raise exceptions.AccountUnavailable(
                 "Initial oauth/authorize redirect was missing session_code"
             )
+        return session_code
 
+    def _post_credentials(self, login_body: dict, session_code: str) -> dict:
+        '''POST to step 1's login endpoint - used identically for the
+        initial credential check and for verify_mfa()'s follow-up call
+        (same endpoint, extra fields merged into `login_body`; see the
+        module docstring). Checks transport/HTTP-level failures only -
+        the caller decides what a non-zero errorCode means.
+        '''
         try:
             resp = self._session.post(
                 f"{_GLOBAL_ID_BASE}/api/v1/login",
-                json={
-                    'email': email,
-                    'password': password,
-                    'terminalUUID': str(uuid.uuid4()),
-                    'privatePolicyChecked': False,
-                },
+                json=login_body,
                 headers={'session_code': session_code},
                 timeout=self._timeout,
             )
@@ -281,13 +301,14 @@ class OmadaCloudAccount:
             raise exceptions.AccountUnavailable(
                 f"Unexpected status {resp.status_code} logging in: {resp.text[:200]}"
             )
+        return resp.json()
 
-        body = resp.json()
-        if body.get('errorCode') != 0:
-            logger.debug("Login rejected: %s", body.get('message'))
-            raise exceptions.LoginFailed(body.get('message', 'login rejected'))
-
-        result = body['result']
+    def _complete_login(self, email: str, result: dict) -> None:
+        '''Steps 2-3 - exchange step 1's result for a Cloud Manager
+        session. Shared by login() and verify_mfa(), since a successful
+        MFA verification responds identically to a successful plain
+        login (see the module docstring).
+        '''
         self.account_id = result['accountId']
         service_url = result['serviceUrl']
 
@@ -323,6 +344,92 @@ class OmadaCloudAccount:
         self._cloud_manager_base = result.get('regionUrl', cloud_manager_base)
         self._id_service_url = service_url
         self._email = email
+
+    def login(self, email: str, password: str) -> None:
+        '''Log in with the full unified-ID SSO chain described in the
+        module docstring. On success, this account can call every
+        Cloud Manager method below and mint EssentialController
+        instances via essential_controller().
+
+        Raises:
+            exceptions.LoginFailed: Credentials rejected.
+            exceptions.MfaRequired: Credentials were accepted but this
+                account has 2FA enabled - call verify_mfa(code) with a
+                fresh code to finish logging in.
+            exceptions.AccountUnavailable: Couldn't reach the identity
+                service, or the SSO hand-off didn't behave as captured
+                (e.g. no redirect where one was expected).
+        '''
+        self._pending_mfa = None
+        session_code = self._begin_oauth_session()
+        login_body = {
+            'email': email,
+            'password': password,
+            'terminalUUID': str(uuid.uuid4()),
+            'privatePolicyChecked': False,
+        }
+        body = self._post_credentials(login_body, session_code)
+
+        if body.get('errorCode') == _MFA_REQUIRED_ERROR_CODE:
+            result = body.get('result') or {}
+            self._pending_mfa = {
+                'login_body': login_body,
+                'session_code': session_code,
+                'mfa_type': result.get('primaryMFAType'),
+                'mfa_process_id': result.get('MFAProcessId'),
+                'email': email,
+            }
+            raise exceptions.MfaRequired(
+                mfa_type=result.get('primaryMFAType'),
+                supported_mfa_types=result.get('supportedMFATypes', []),
+                email=result.get('MFAEmail'),
+            )
+
+        if body.get('errorCode') != 0:
+            logger.debug("Login rejected: %s", body.get('message'))
+            raise exceptions.LoginFailed(body.get('message', 'login rejected'))
+
+        self._complete_login(email, body['result'])
+
+    def verify_mfa(self, code: str) -> None:
+        '''Complete a login that raised exceptions.MfaRequired, by
+        resubmitting the credential check with this code merged in -
+        see the module docstring for why this isn't a separate
+        endpoint. Only valid to call right after login() raised
+        MfaRequired - the pending state (email/password/session_code/
+        mfaProcessId) it stashed is cleared as soon as this succeeds or
+        the login() that started it is retried.
+
+        Raises:
+            exceptions.AccountUnavailable: No pending MFA challenge
+                (verify_mfa() called without a preceding login() that
+                raised MfaRequired), or the identity service couldn't
+                be reached.
+            exceptions.LoginFailed: The code was rejected.
+        '''
+        if self._pending_mfa is None:
+            raise exceptions.AccountUnavailable(
+                "No pending MFA challenge - call login() first"
+            )
+        pending = self._pending_mfa
+
+        body = self._post_credentials(
+            {
+                **pending['login_body'],
+                'needMfa': True,
+                'mfaType': pending['mfa_type'],
+                'code': code,
+                'mfaProcessId': pending['mfa_process_id'],
+            },
+            pending['session_code'],
+        )
+
+        if body.get('errorCode') != 0:
+            logger.debug("MFA verification rejected: %s", body.get('message'))
+            raise exceptions.LoginFailed(body.get('message', 'MFA verification rejected'))
+
+        self._pending_mfa = None
+        self._complete_login(pending['email'], body['result'])
 
     def logout(self) -> None:
         '''Log out of TP-Link Omada Cloud (POST {id_service_url}/logout)
