@@ -11,12 +11,17 @@ ORG_ID = '0000000000000000000000000000000'
 
 
 def _controller():
-    return EssentialController(
+    '''A controller with Shiro priming already marked done, so tests
+    for individual data methods don't also have to mock
+    current/login-status - see TestShiroLoginPriming for that.'''
+    controller = EssentialController(
         session=requests.Session(),
         org_id=ORG_ID,
         base_url=BASE_URL,
         csrf_token='fake-csrf-token',
     )
+    controller._shiro_login_done = True
+    return controller
 
 
 class TestHeaders:
@@ -29,6 +34,71 @@ class TestHeaders:
             session=requests.Session(), org_id=ORG_ID, base_url=BASE_URL, csrf_token=None,
         )
         assert 'Csrf-Token' not in controller._headers()
+
+
+class TestShiroLoginPriming:
+    '''current/login-status?needToken=true must be called once before
+    any other endpoint works, confirmed live - see the module
+    docstring. A fresh EssentialController (not the `_controller()`
+    helper, which pre-marks this done) exercises that priming call.'''
+
+    def _fresh_controller(self):
+        return EssentialController(
+            session=requests.Session(),
+            org_id=ORG_ID,
+            base_url=BASE_URL,
+            csrf_token='fake-csrf-token',
+        )
+
+    def test_primes_before_the_first_data_call(self, requests_mock):
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/current/login-status',
+            json={'errorCode': 0, 'msg': 'OK', 'result': {'needShiroLogin': True}},
+        )
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/organization/site-ids',
+            json={'errorCode': 0, 'msg': 'Success.', 'result': {'siteIds': ['a']}},
+        )
+        controller = self._fresh_controller()
+
+        result = controller.get_site_ids()
+
+        assert result == ['a']
+        methods_and_paths = [(r.method, r.path) for r in requests_mock.request_history]
+        assert methods_and_paths == [
+            ('GET', f'/{ORG_ID}/api/v2/current/login-status'),
+            ('GET', f'/{ORG_ID}/api/v2/organization/site-ids'),
+        ]
+
+    def test_only_primes_once_per_instance(self, requests_mock):
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/current/login-status',
+            json={'errorCode': 0, 'msg': 'OK', 'result': {}},
+        )
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/organization/site-ids',
+            json={'errorCode': 0, 'msg': 'Success.', 'result': {'siteIds': []}},
+        )
+        controller = self._fresh_controller()
+
+        controller.get_site_ids()
+        controller.get_site_ids()
+
+        login_status_calls = [
+            r for r in requests_mock.request_history
+            if r.path == f'/{ORG_ID}/api/v2/current/login-status'
+        ]
+        assert len(login_status_calls) == 1
+
+    def test_priming_failure_propagates(self, requests_mock):
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/current/login-status',
+            json={'errorCode': -1, 'msg': 'not logged in'},
+        )
+        controller = self._fresh_controller()
+
+        with pytest.raises(exceptions.ApiError):
+            controller.get_site_ids()
 
 
 class TestGetSites:
@@ -151,3 +221,58 @@ class TestGetDashboardOverview:
         result = controller.get_dashboard_overview('site-1')
 
         assert result == {'onlineDevices': 5}
+
+
+class TestControllerWakingUpRetry:
+    '''errorCode -1200 ("logged out of the controller ... try to log in
+    again later") is confirmed live on the first real data call after a
+    fresh login against a free-tier organization - the controller
+    appears to need a few seconds to spin up. _get()/_post() retry a
+    few times with backoff on this specific error before giving up.'''
+
+    def test_retries_and_succeeds_after_transient_wakeup_error(self, requests_mock, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr('time.sleep', sleeps.append)
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/organization/site-ids',
+            [
+                {'json': {'errorCode': -1200, 'msg': 'logged out of the controller'}},
+                {'json': {'errorCode': -1200, 'msg': 'logged out of the controller'}},
+                {'json': {'errorCode': 0, 'msg': 'Success.', 'result': {'siteIds': ['a']}}},
+            ],
+        )
+        controller = _controller()
+
+        result = controller.get_site_ids()
+
+        assert result == ['a']
+        assert len(sleeps) == 2  # two failed attempts before the third succeeded
+        assert sleeps == [2, 5]
+
+    def test_gives_up_after_exhausting_retries(self, requests_mock, monkeypatch):
+        monkeypatch.setattr('time.sleep', lambda _seconds: None)
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/organization/site-ids',
+            json={'errorCode': -1200, 'msg': 'still logged out of the controller'},
+        )
+        controller = _controller()
+
+        with pytest.raises(exceptions.ApiError) as exc_info:
+            controller.get_site_ids()
+
+        assert exc_info.value.error_code == -1200
+
+    def test_other_error_codes_are_not_retried(self, requests_mock, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr('time.sleep', sleeps.append)
+        requests_mock.get(
+            f'{BASE_URL}/{ORG_ID}/api/v2/organization/site-ids',
+            json={'errorCode': -1, 'msg': 'some other failure'},
+        )
+        controller = _controller()
+
+        with pytest.raises(exceptions.ApiError) as exc_info:
+            controller.get_site_ids()
+
+        assert exc_info.value.error_code == -1
+        assert sleeps == []

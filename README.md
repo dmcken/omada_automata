@@ -21,10 +21,9 @@ organization, two sites, no MFA). See the module docstrings in
 [src/omada_automata/account.py](src/omada_automata/account.py) and
 [src/omada_automata/essential.py](src/omada_automata/essential.py) for
 exactly what's confirmed vs assumed - in particular, `get_devices()`,
-`get_clients()`, and `get_dashboard_overview()` return raw dicts rather
-than parsed dataclasses, because the response bodies for those
-endpoints weren't captured in the HAR this was built from (only their
-request shape and byte size were).
+`get_clients()`, and `get_dashboard_overview()` return raw dicts/lists
+rather than parsed dataclasses. Their shapes have now been confirmed
+against a live account, just not yet turned into dataclasses.
 
 Not covered yet: Omada Central (a separate dashboard product also seen
 in the source capture), MFA/2FA-enabled accounts, and any

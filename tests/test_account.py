@@ -52,6 +52,11 @@ class TestParseRedirectFragment:
 
 
 def _mock_login_chain(requests_mock, *, login_error_code=0, oauth_status=302):
+    requests_mock.get(
+        'https://api-id.tplinkcloud.com/oauth/authorize',
+        status_code=302,
+        headers={'Location': 'https://id.tplinkcloud.com/#/login?session_code=fake-session-code'},
+    )
     requests_mock.post(
         'https://h2api-id.tplinkcloud.com/api/v1/login',
         json={
@@ -107,9 +112,29 @@ class TestLogin:
 
         account.login('test.user@example.com', 'fake-password')
 
-        sent = requests_mock.request_history[0].json()
+        login_request = next(
+            r for r in requests_mock.request_history
+            if r.url == 'https://h2api-id.tplinkcloud.com/api/v1/login'
+        )
+        sent = login_request.json()
         assert sent['email'] == 'test.user@example.com'
         assert sent['password'] == 'fake-password'
+
+    def test_sends_session_code_header_from_initial_oauth_redirect(self, requests_mock):
+        '''Regression test: this header is what ties the login POST to
+        the specific pending OAuth request from step 0 - confirmed live
+        that omitting it makes login-with-uid-code fail with
+        "[-52054] Account authentication code is invalid" instead.'''
+        _mock_login_chain(requests_mock)
+        account = OmadaCloudAccount()
+
+        account.login('test.user@example.com', 'fake-password')
+
+        login_request = next(
+            r for r in requests_mock.request_history
+            if r.url == 'https://h2api-id.tplinkcloud.com/api/v1/login'
+        )
+        assert login_request.headers['session_code'] == 'fake-session-code'
 
     def test_rejected_credentials_raise_login_failed(self, requests_mock):
         _mock_login_chain(requests_mock, login_error_code=1)
@@ -136,10 +161,17 @@ class TestLogin:
             account.login('test.user@example.com', 'fake-password')
 
     def test_connection_error_raises_account_unavailable(self, requests_mock):
-        requests_mock.post(
-            'https://h2api-id.tplinkcloud.com/api/v1/login',
+        requests_mock.get(
+            'https://api-id.tplinkcloud.com/oauth/authorize',
             exc=requests.exceptions.ConnectionError,
         )
+        account = OmadaCloudAccount()
+
+        with pytest.raises(exceptions.AccountUnavailable):
+            account.login('test.user@example.com', 'fake-password')
+
+    def test_initial_oauth_authorize_not_a_redirect_raises_account_unavailable(self, requests_mock):
+        requests_mock.get('https://api-id.tplinkcloud.com/oauth/authorize', status_code=200)
         account = OmadaCloudAccount()
 
         with pytest.raises(exceptions.AccountUnavailable):

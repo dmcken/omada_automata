@@ -6,8 +6,34 @@ captured HAR of the id.tplinkcloud.com / omada-cloud web UI (one
 organization, two sites, no MFA on the account). Auth flow, all under
 *.tplinkcloud.com:
 
+0. GET https://api-id.tplinkcloud.com/oauth/authorize
+   ?clientId=omada-cloud-portal&redirectUri={redirect_uri}
+   &responseType=code&state={state}&scope=openid
+   -> 302 -> Location: https://id.tplinkcloud.com/#/login?session_code=...
+   `state` is client-generated (the frontend's own opaque round-trip
+   value - a random string here). This step is NOT optional, despite
+   looking skippable at first glance (nothing in the login POST body
+   below visibly references it): the `session_code` from this
+   redirect's Location must be sent back as a `session_code` HTTP
+   *header* (not body, not query string - easy to miss, and originally
+   missed here) on the login POST in step 1, or step 3 fails with
+   "[-52054] Account authentication code is invalid" - confirmed live
+   both ways (with and without it). Without that header, the login
+   POST still succeeds, but the server has no way to associate it with
+   this specific pending OAuth request, so it silently falls back to
+   some default/self-referential client instead of the one actually
+   requested - `redirectParams` in step 1's response comes back for an
+   entirely different, unusable client (`clientId=unified_id`) when the
+   header is omitted, versus correctly echoing back `omada-cloud-portal`
+   (this step 0's own clientId/redirectUri/responseType/scope/state)
+   when it's included. `redirect_uri` here doesn't need to match the
+   account's real region - it's just an opaque value the server
+   round-trips back verbatim; the *real* region-correct redirect
+   happens in step 2 against `serviceUrl`.
+
 1. POST https://h2api-id.tplinkcloud.com/api/v1/login
-   {"email", "password", "terminalUUID", "privatePolicyChecked": false}
+   Header: session_code: {session_code from step 0}
+   Body: {"email", "password", "terminalUUID", "privatePolicyChecked": false}
    -> {"result": {"accountId", "serviceUrl", "redirectParams"}}.
    `serviceUrl` is this account's *regional* unified-ID host (e.g.
    "https://use1-api-id.tplinkcloud.com") - h2api-id.tplinkcloud.com is
@@ -27,17 +53,15 @@ organization, two sites, no MFA on the account). Auth flow, all under
 3. POST {cloud_manager_base}/api/v1/central/account/login-with-uid-code
    {"code", "state", "uidServiceUrl": serviceUrl, "canary": true}
    -> {"result": {"csrfToken", "regionUrl", "redirectUrl"}}.
-   This is the call that actually establishes the session. The HAR
-   this was built from had cookies stripped from every request/response
-   (a devtools export quirk, not something this code can see around) -
-   but a plain `requests.Session()` carries whatever cookies the server
-   actually sets across every call below regardless of whether a HAR
-   viewer chose to display them, so this isn't a gap in the
-   implementation, just in what could be directly confirmed from the
-   capture. `csrfToken` must be sent back as the `Csrf-Token` header on
-   every authenticated call from here on - confirmed to be the *same*
-   token accepted by both Cloud Manager and a per-organization
-   Essential Controller.
+   This is the call that actually establishes the session - step 1's
+   login POST sets `UID_SSO_SID`/`SESSION` cookies (confirmed live,
+   despite the HAR this was built from having cookies stripped from
+   every request/response - a devtools export quirk, not a gap in this
+   implementation), and a plain `requests.Session()` carries them
+   across every call below automatically. `csrfToken` must be sent
+   back as the `Csrf-Token` header on every authenticated call from
+   here on - confirmed to be the *same* token accepted by both Cloud
+   Manager and a per-organization Essential Controller.
 
    cloud_manager_base for step 3 is never handed to the client by any
    prior response - the web UI derives it from serviceUrl's own
@@ -81,6 +105,8 @@ from .essential import EssentialController
 logger = logging.getLogger(__name__)
 
 _GLOBAL_ID_BASE = 'https://h2api-id.tplinkcloud.com'
+_GLOBAL_OAUTH_AUTHORIZE_URL = 'https://api-id.tplinkcloud.com/oauth/authorize'
+_DEFAULT_REDIRECT_URI = 'https://use1-omada-cloud.tplinkcloud.com/#/loginRedirect'
 _REDIRECT_STATUS_CODES = (301, 302, 303, 307, 308)
 
 
@@ -212,6 +238,31 @@ class OmadaCloudAccount:
                 (e.g. no redirect where one was expected).
         '''
         try:
+            resp = self._session.get(
+                _GLOBAL_OAUTH_AUTHORIZE_URL,
+                params={
+                    'clientId': 'omada-cloud-portal',
+                    'redirectUri': _DEFAULT_REDIRECT_URI,
+                    'responseType': 'code',
+                    'state': uuid.uuid4().hex[:6],
+                    'scope': 'openid',
+                },
+                allow_redirects=False,
+                timeout=self._timeout,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
+            raise exceptions.AccountUnavailable("Could not reach the identity service") from exc
+        if resp.status_code not in _REDIRECT_STATUS_CODES or 'Location' not in resp.headers:
+            raise exceptions.AccountUnavailable(
+                f"Initial oauth/authorize did not redirect as expected (status {resp.status_code})"
+            )
+        session_code = _parse_redirect_fragment(resp.headers['Location']).get('session_code')
+        if not session_code:
+            raise exceptions.AccountUnavailable(
+                "Initial oauth/authorize redirect was missing session_code"
+            )
+
+        try:
             resp = self._session.post(
                 f"{_GLOBAL_ID_BASE}/api/v1/login",
                 json={
@@ -220,6 +271,7 @@ class OmadaCloudAccount:
                     'terminalUUID': str(uuid.uuid4()),
                     'privatePolicyChecked': False,
                 },
+                headers={'session_code': session_code},
                 timeout=self._timeout,
             )
         except (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout) as exc:
