@@ -30,33 +30,19 @@ real run can be used to fill in proper dataclasses for them later.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import pathlib
 import pprint
-import stat
 import sys
 from collections.abc import Callable
 
+import _session_cache
 import dotenv
 
-import omada_automata
 from omada_automata import exceptions
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
-
-SESSION_CACHE_PATH = pathlib.Path(__file__).parent / '.omada_session.json'
-
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        sys.exit(
-            f"Missing required {name} - copy examples/.env.example to "
-            "examples/.env and fill it in"
-        )
-    return value
 
 
 def _section(title: str) -> None:
@@ -78,37 +64,6 @@ def _safe_call(label: str, fn: Callable[[], object]) -> object | None:
     return result
 
 
-def _load_cached_account() -> omada_automata.OmadaCloudAccount | None:
-    '''Restore a session cached by a previous run, if one exists and
-    is still valid - is_logged_in() makes one real request, so this
-    still costs a round trip, just a much cheaper one than the full
-    3-step login chain.
-    '''
-    if not SESSION_CACHE_PATH.exists():
-        return None
-    account = omada_automata.OmadaCloudAccount()
-    account.restore_session_state(json.loads(SESSION_CACHE_PATH.read_text()))
-    if not account.is_logged_in():
-        print(f"Cached session in {SESSION_CACHE_PATH} has expired")
-        return None
-    print(f"Reusing cached session from {SESSION_CACHE_PATH}")
-    return account
-
-
-def _save_session_cache(account: omada_automata.OmadaCloudAccount) -> None:
-    SESSION_CACHE_PATH.write_text(json.dumps(account.get_session_state()))
-    SESSION_CACHE_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600 - as sensitive as a password
-
-
-def _logout_and_exit() -> None:
-    account = _load_cached_account()
-    if account is None:
-        sys.exit("No cached (still-valid) session to log out of")
-    account.logout()
-    SESSION_CACHE_PATH.unlink(missing_ok=True)
-    print("Logged out, session cache removed")
-
-
 def main() -> None:
     dotenv.load_dotenv(pathlib.Path(__file__).parent / '.env')
 
@@ -122,25 +77,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.logout:
-        _logout_and_exit()
+        _session_cache.logout_and_exit()
         return
 
-    email = _require_env('OMADA_EMAIL')
-    password = _require_env('OMADA_PASSWORD')
+    email = _session_cache.require_env('OMADA_EMAIL')
+    password = _session_cache.require_env('OMADA_PASSWORD')
     wanted_org_id = os.environ.get('OMADA_ORG_ID') or None
     wanted_site_id = os.environ.get('OMADA_SITE_ID') or None
 
-    account = _load_cached_account()
-    if account is None:
-        account = omada_automata.OmadaCloudAccount()
-        _section('Login')
-        try:
-            account.login(email, password)
-        except exceptions.LoginFailed as exc:
-            sys.exit(f"Login rejected: {exc}")
-        except exceptions.AccountUnavailable as exc:
-            sys.exit(f"Could not reach TP-Link Omada Cloud: {exc}")
-        _save_session_cache(account)
+    account = _session_cache.login_with_cache(email, password)
     print(f"Logged in, account_id={account.account_id}")
 
     _section('Account detail')
