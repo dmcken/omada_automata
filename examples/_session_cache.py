@@ -9,12 +9,16 @@ password) and reused on the next run via restore_session_state(),
 skipping the full SSO login chain entirely as long as is_logged_in()
 still says it's valid.
 
-If the account has 2FA enabled, login_with_cache() prompts on stdin for
-a code (confirmed live against a TOTP/authenticator-app account - see
-account.py's module docstring) - fine for these interactive example
-scripts, but an unattended/cron caller would need a different
-approach (e.g. mostly relying on a long-lived cached session and only
-handling this prompt on the rare occasions it's actually needed).
+If the account has 2FA enabled, login_with_cache() completes it two
+ways: automatically via OMADA_TOTP_SECRET in examples/.env if set (the
+base32 secret decoded from the account's authenticator-app QR code -
+confirmed live end-to-end against a real Authy/TOTP account), or by
+prompting on stdin for a code otherwise. Either way this is still only
+practical for an interactive-ish caller (or one willing to keep a TOTP
+secret alongside its other credentials) - a fully unattended/cron
+caller without OMADA_TOTP_SECRET configured would need to mostly rely
+on a long-lived cached session instead and only handle this on the
+rare occasions it's actually needed.
 '''
 from __future__ import annotations
 
@@ -25,6 +29,11 @@ import stat
 import sys
 
 import omada_automata
+
+try:
+    from omada_automata import totp as _totp
+except ImportError:
+    _totp = None
 
 SESSION_CACHE_PATH = pathlib.Path(__file__).parent / '.omada_session.json'
 
@@ -70,6 +79,25 @@ def logout_and_exit() -> None:
     print("Logged out, session cache removed")
 
 
+def _complete_mfa_automatically(
+    account: omada_automata.OmadaCloudAccount, totp_secret: str
+) -> bool:
+    '''Try each of a few adjacent-time-step TOTP codes (drift
+    tolerance) against the pending challenge login() just raised.
+    Returns False (never raises for a rejected code) if every
+    candidate was rejected, so the caller can fall back to prompting -
+    verify_mfa()'s pending state survives a rejected code, so trying
+    more than one here is safe.
+    '''
+    for code in _totp.generate_totp_codes_with_drift_tolerance(totp_secret):
+        try:
+            account.verify_mfa(code)
+            return True
+        except omada_automata.exceptions.LoginFailed:
+            continue
+    return False
+
+
 def _complete_mfa_interactively(
     account: omada_automata.OmadaCloudAccount,
     exc: omada_automata.exceptions.MfaRequired,
@@ -87,10 +115,23 @@ def _complete_mfa_interactively(
                 sys.exit("Too many failed MFA attempts, giving up.")
 
 
+def _complete_mfa(
+    account: omada_automata.OmadaCloudAccount, exc: omada_automata.exceptions.MfaRequired
+) -> None:
+    totp_secret = os.environ.get('OMADA_TOTP_SECRET')
+    if totp_secret and _totp is not None:
+        if _complete_mfa_automatically(account, totp_secret):
+            print("Completed 2FA automatically via OMADA_TOTP_SECRET.")
+            return
+        print("Auto-generated TOTP codes were all rejected - falling back to a manual code.")
+
+    _complete_mfa_interactively(account, exc)
+
+
 def login_with_cache(email: str, password: str) -> omada_automata.OmadaCloudAccount:
     '''Reuse a cached session if one is still valid, otherwise run the
-    full login chain - prompting on stdin for a 2FA code if the
-    account has one configured - and cache the result for next time.
+    full login chain - completing 2FA per _complete_mfa() above if the
+    account has it enabled - and cache the result for next time.
     '''
     account = load_cached_account()
     if account is not None:
@@ -100,7 +141,7 @@ def login_with_cache(email: str, password: str) -> omada_automata.OmadaCloudAcco
     try:
         account.login(email, password)
     except omada_automata.exceptions.MfaRequired as exc:
-        _complete_mfa_interactively(account, exc)
+        _complete_mfa(account, exc)
     except omada_automata.exceptions.LoginFailed as exc:
         sys.exit(f"Login rejected: {exc}")
     except omada_automata.exceptions.AccountUnavailable as exc:

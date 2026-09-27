@@ -35,6 +35,12 @@ dependencies = [
 dev = ["check-manifest"]
 test = ["pytest", "requests-mock", "coverage"]
 examples = ["python-dotenv"]
+# Only needed to auto-generate TOTP codes for verify_mfa() (an account
+# with 2FA disabled, or one that relies on the interactive prompt in
+# examples/_session_cache.py instead, doesn't need this) - kept as an
+# extra so consumers of this package aren't forced onto pyotp just to
+# import it. See omada_automata.totp.
+totp = ["pyotp"]
 
 [project.urls]
 "Homepage"      = "https://github.com/dmcken/omada_automata"
@@ -54,6 +60,9 @@ dev = [
 ]
 examples = [
     "python-dotenv>=1.0.0",
+]
+totp = [
+    "pyotp>=2.9.0",
 ]
 
 [tool.ruff]
