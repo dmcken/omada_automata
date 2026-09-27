@@ -41,6 +41,11 @@ examples = ["python-dotenv"]
 # extra so consumers of this package aren't forced onto pyotp just to
 # import it. See omada_automata.totp.
 totp = ["pyotp"]
+# Only needed for EssentialController.ping()/traceroute()/dns_lookup()/
+# arp_table() - their results stream back over a SockJS+STOMP
+# WebSocket rather than plain REST (see essential.py's module
+# docstring), which needs a real WebSocket client underneath.
+network-check = ["websocket-client"]
 
 [project.urls]
 "Homepage"      = "https://github.com/dmcken/omada_automata"
@@ -63,6 +68,9 @@ examples = [
 ]
 totp = [
     "pyotp>=2.9.0",
+]
+network-check = [
+    "websocket-client>=1.8.0",
 ]
 
 [tool.ruff]

@@ -561,6 +561,7 @@ class OmadaCloudAccount:
             essential=api_url.get('essential'),
             central=api_url.get('central'),
             vms=api_url.get('vms'),
+            redirect_url=api_url.get('redirectUrl'),
         )
 
     def essential_controller(self, org_id: str) -> EssentialController:
@@ -583,5 +584,6 @@ class OmadaCloudAccount:
             org_id=org_id,
             base_url=hosts.essential,
             csrf_token=self._csrf_token,
+            frontend_origin=hosts.redirect_url,
             timeout=self._timeout,
         )

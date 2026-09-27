@@ -36,6 +36,7 @@ class OrganizationHosts:
     essential: str | None
     central: str | None
     vms: str | None
+    redirect_url: str | None
 
 
 @dataclasses.dataclass
