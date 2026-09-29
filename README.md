@@ -1,4 +1,6 @@
 # Omada Automations
+[![Tests](https://github.com/dmcken/omada_automata/actions/workflows/tests.yml/badge.svg)](https://github.com/dmcken/omada_automata/actions/workflows/tests.yml)
+[![Ruff](https://github.com/dmcken/omada_automata/actions/workflows/ruff.yml/badge.svg)](https://github.com/dmcken/omada_automata/actions/workflows/ruff.yml)
 
 Automate login to TP-Link's Omada Cloud (id.tplinkcloud.com /
 omada-cloud web UI) and fetch data from an "Omada Essential" cloud-
