@@ -6,7 +6,7 @@ from . import exceptions
 
 # Classes
 from .account import OmadaCloudAccount
-from .essential import EssentialController
+from .essential import EssentialController, device_status_label
 
 # TOTP code generation needs the 'totp' extra (pyotp) - every other
 # class/function here is requests-only. Degrade to None rather than
@@ -20,11 +20,12 @@ except ImportError:
 
 # Versions should comply with PEP 440:
 # https://www.python.org/dev/peps/pep-0440/
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     'EssentialController',
     'OmadaCloudAccount',
+    'device_status_label',
     'exceptions',
     'generate_totp_code',
 ]

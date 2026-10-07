@@ -8,7 +8,7 @@ import pytest
 import requests
 
 from omada_automata import exceptions
-from omada_automata.essential import EssentialController
+from omada_automata.essential import DEVICE_STATUS_UNKNOWN, EssentialController, device_status_label
 
 BASE_URL = 'https://use1-api-omada-essential-controller.tplinkcloud.com'
 ORG_ID = '0000000000000000000000000000000'
@@ -469,3 +469,20 @@ class TestArpTable:
         assert result == {DEVICE_MAC: '? (10.0.0.1) at aa:bb on eth0\n'}
         sent = requests_mock.request_history[-1].json()
         assert sent == {'deviceType': 0, 'source': [DEVICE_MAC], 'nid': _FIXED_NID}
+
+
+class TestDeviceStatusLabel:
+    @pytest.mark.parametrize('status, label', [
+        (0, 'Disconnected'),
+        (10, 'Provisioning'),
+        (11, 'Configuring'),
+        (12, 'Upgrading'),
+        (13, 'Rebooting'),
+        (14, 'Connected'),
+    ])
+    def test_known_codes(self, status, label):
+        assert device_status_label(status) == label
+
+    @pytest.mark.parametrize('status', [1, 9, 15, -1, None])
+    def test_unmapped_code_is_unknown(self, status):
+        assert device_status_label(status) == DEVICE_STATUS_UNKNOWN

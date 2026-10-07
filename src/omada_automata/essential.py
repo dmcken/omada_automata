@@ -113,6 +113,28 @@ TEST_TRACEROUTE = 1
 TEST_DNS_LOOKUP = 2
 TEST_ARP_TABLE = 3
 
+# get_devices()'s raw `status` field is a numeric code with no dataclass to
+# decode it yet (see the module docstring). 14 was confirmed live (an
+# ER605/SG2206MP/EAP720 all showing "Connected" in the Omada UI); the rest
+# map to the Omada UI's other device status labels. Treat any value not
+# listed here as unknown rather than assuming it means disconnected.
+DEVICE_STATUS = {
+    0: 'Disconnected',
+    10: 'Provisioning',
+    11: 'Configuring',
+    12: 'Upgrading',
+    13: 'Rebooting',
+    14: 'Connected',
+}
+DEVICE_STATUS_UNKNOWN = 'Unknown'
+
+
+def device_status_label(status: int | None) -> str:
+    '''Omada UI label for a get_devices() entry's raw `status` code -
+    DEVICE_STATUS_UNKNOWN for anything not (yet) in DEVICE_STATUS,
+    including a missing status.'''
+    return DEVICE_STATUS.get(status, DEVICE_STATUS_UNKNOWN)
+
 _DEFAULT_NETWORK_CHECK_TIMEOUT = 70.0
 # Confirmed live: ARP Table's single output chunk never gets a
 # finish:true (unlike Ping/Traceroute/DNS Lookup, all confirmed to set
