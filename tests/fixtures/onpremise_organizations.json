@@ -1,0 +1,43 @@
+{
+    "errorCode": 0,
+    "msg": "OK",
+    "result": {
+        "totalRows": 1,
+        "currentPage": 1,
+        "currentSize": 20,
+        "data": [
+            {
+                "deviceId": "15F38835C91D9BECBDCBB3ADFA4019AE65E890E8",
+                "status": 1,
+                "deviceName": "Omada Controller",
+                "alias": "Test Site",
+                "deviceMac": "78-20-51-BB-1B-AA",
+                "deviceModel": "OC200",
+                "deviceHwVer": "2.0",
+                "deviceType": "SMB.OMADA.HARDWARECONTROLLER",
+                "fwVer": "2.27.11 Build 20260904 Rel.29923",
+                "appServerUrl": "https://n-use1-wap.tplinkcloud.com",
+                "isSameRegion": true,
+                "role": 1,
+                "controllerVersion": "6.3.0.45",
+                "alerts": 1,
+                "sites": 1,
+                "devices": 3,
+                "clients": 5,
+                "ip": "10.64.0.3",
+                "httpPort": 80,
+                "mspMode": false,
+                "configured": true,
+                "hwId": "CE842C9F7FCE3CD8E0D0F7ADDEE6A205",
+                "omadacId": "ca492293b47ebc7e8254dc25e95a4596",
+                "category": "local",
+                "sn": "Y257375000655",
+                "showModel": "OC200 v2.0",
+                "mfaStatus": false,
+                "cloudAccessUrl": "https://use1-api-omada-cloud-access.tplinkcloud.com",
+                "connectorUrl": "https://use1-api-omada-controller-connector.tplinkcloud.com",
+                "guardUrl": "https://use1-api-omada-controller-connector.tplinkcloud.com"
+            }
+        ]
+    }
+}

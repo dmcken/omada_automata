@@ -323,7 +323,7 @@ class _FakeSockJsStompClient:
 def _install_fake_ws_client(monkeypatch, messages):
     fake_class = type('FakeSockJsStompClient', (_FakeSockJsStompClient,), {'messages': messages})
     monkeypatch.setattr('omada_automata._sockjs_stomp.SockJsStompClient', fake_class)
-    monkeypatch.setattr('omada_automata.essential.uuid.uuid4', lambda: _FIXED_UUID)
+    monkeypatch.setattr('omada_automata._network_check.uuid.uuid4', lambda: _FIXED_UUID)
     return fake_class
 
 

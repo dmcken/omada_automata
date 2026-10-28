@@ -8,7 +8,9 @@ from omada_automata.account import (
     OmadaCloudAccount,
     _cookies_from_list,
     _cookies_to_list,
+    _guess_cloud_access_base,
     _guess_cloud_manager_base,
+    _guess_frontend_origin,
     _parse_redirect_fragment,
 )
 
@@ -23,6 +25,22 @@ class TestGuessCloudManagerBase:
     def test_unrecognized_host_raises(self):
         with pytest.raises(exceptions.AccountUnavailable):
             _guess_cloud_manager_base('https://not-the-expected-shape.example.com')
+
+
+class TestGuessCloudAccessBase:
+    def test_swaps_cloud_manager_for_cloud_access(self):
+        assert (
+            _guess_cloud_access_base('https://use1-api-omada-cloud-manager.tplinkcloud.com')
+            == 'https://use1-api-omada-cloud-access.tplinkcloud.com'
+        )
+
+
+class TestGuessFrontendOrigin:
+    def test_swaps_cloud_manager_for_omada_cloud(self):
+        assert (
+            _guess_frontend_origin('https://use1-api-omada-cloud-manager.tplinkcloud.com')
+            == 'https://use1-omada-cloud.tplinkcloud.com'
+        )
 
 
 class TestCookieSerialization:
@@ -530,3 +548,96 @@ class TestSessionState:
         account = _LoggedInAccount()
 
         json.dumps(account.get_session_state())  # must not raise
+
+
+_ONPREM_DEVICE_ID = '15F38835C91D9BECBDCBB3ADFA4019AE65E890E8'
+_ONPREM_CONNECTOR_URL = 'https://use1-api-omada-controller-connector.tplinkcloud.com'
+
+
+class TestListOnpremiseControllers:
+    def test_parses_controller_fields(self, requests_mock, load_json):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com/api/v1/cloudaccess/organizations',
+            json=load_json('onpremise_organizations.json'),
+        )
+        account = _LoggedInAccount()
+
+        controllers = account.list_onpremise_controllers()
+
+        assert len(controllers) == 1
+        controller = controllers[0]
+        assert controller.device_id == _ONPREM_DEVICE_ID
+        assert controller.alias == 'Test Site'
+        assert controller.show_model == 'OC200 v2.0'
+        assert controller.sites == 1
+        assert controller.devices == 3
+        assert controller.clients == 5
+        assert controller.alerts == 1
+        assert controller.connector_url == _ONPREM_CONNECTOR_URL
+        assert controller.omadac_id == 'ca492293b47ebc7e8254dc25e95a4596'
+
+    def test_sends_device_type_zero_filter(self, requests_mock, load_json):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com/api/v1/cloudaccess/organizations',
+            json=load_json('onpremise_organizations.json'),
+        )
+        account = _LoggedInAccount()
+
+        account.list_onpremise_controllers()
+
+        query = requests_mock.request_history[0].qs
+        assert query['filters.devicetype'] == ['0']
+
+
+class TestOnpremiseController:
+    def test_connects_via_start_launch(self, requests_mock, load_json):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com/api/v1/cloudaccess/organizations',
+            json=load_json('onpremise_organizations.json'),
+        )
+        requests_mock.post(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com'
+            f'/api/v2/cloudaccess/organizations/{_ONPREM_DEVICE_ID}/startLaunch',
+            json={
+                'errorCode': 0, 'msg': 'Success.',
+                'result': {'omadacId': 'ca492293b47ebc7e8254dc25e95a4596', 'mfaStatus': False},
+            },
+        )
+        account = _LoggedInAccount()
+
+        controller = account.onpremise_controller(_ONPREM_DEVICE_ID)
+
+        assert controller._omadac_id == 'ca492293b47ebc7e8254dc25e95a4596'
+        assert controller._base_url == f'{_ONPREM_CONNECTOR_URL}/omadac/{_ONPREM_DEVICE_ID}'
+        assert controller._csrf_token == 'fake-csrf-token'
+        assert controller._frontend_origin == 'https://use1-omada-cloud.tplinkcloud.com'
+
+    def test_sends_app_server_url_from_listing(self, requests_mock, load_json):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com/api/v1/cloudaccess/organizations',
+            json=load_json('onpremise_organizations.json'),
+        )
+        requests_mock.post(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com'
+            f'/api/v2/cloudaccess/organizations/{_ONPREM_DEVICE_ID}/startLaunch',
+            json={
+                'errorCode': 0, 'msg': 'Success.',
+                'result': {'omadacId': 'x', 'mfaStatus': False},
+            },
+        )
+        account = _LoggedInAccount()
+
+        account.onpremise_controller(_ONPREM_DEVICE_ID)
+
+        sent = requests_mock.request_history[-1].json()
+        assert sent == {'view': '0', 'appServerUrl': 'https://n-use1-wap.tplinkcloud.com'}
+
+    def test_unknown_device_id_raises_api_error(self, requests_mock, load_json):
+        requests_mock.get(
+            'https://use1-api-omada-cloud-access.tplinkcloud.com/api/v1/cloudaccess/organizations',
+            json=load_json('onpremise_organizations.json'),
+        )
+        account = _LoggedInAccount()
+
+        with pytest.raises(exceptions.ApiError):
+            account.onpremise_controller('not-a-real-device-id')

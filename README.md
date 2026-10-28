@@ -3,33 +3,47 @@
 [![Ruff](https://github.com/dmcken/omada_automata/actions/workflows/ruff.yml/badge.svg)](https://github.com/dmcken/omada_automata/actions/workflows/ruff.yml)
 
 Automate login to TP-Link's Omada Cloud (id.tplinkcloud.com /
-omada-cloud web UI) and fetch data from an "Omada Essential" cloud-
-hosted controller - sites, devices, clients, alerts.
+omada-cloud web UI) and fetch data from both an "Omada Essential"
+cloud-hosted controller and an on-premise hardware controller (e.g. an
+OC200) reached remotely through Cloud Access - sites, devices,
+clients, alerts, and network-check tools (ping/traceroute/dns-lookup/
+arp-table) for both.
 
 ## Modules
 
-- `OmadaCloudAccount` - unified-ID SSO login (email/password), plus
-  Cloud Manager account/organization data (organization list,
-  per-organization API hosts). Also covers logout, and session caching
-  (`get_session_state()`/`restore_session_state()`/`is_logged_in()`) so
-  a repeatedly-invoked caller (a monitoring job run on a schedule) can
-  skip the full login chain on every run.
-- `EssentialController` - one organization's Essential Controller -
-  sites, devices, clients, alert counts, dashboard overview. Obtained
-  via `OmadaCloudAccount.essential_controller(org_id)`.
+- `OmadaCloudAccount` - unified-ID SSO login (email/password, with
+  TOTP 2FA support via `verify_mfa()`), plus Cloud Manager
+  account/organization data (organization list, per-organization API
+  hosts) and Cloud Access on-premise controller discovery
+  (`list_onpremise_controllers()`). Also covers logout, and session
+  caching (`get_session_state()`/`restore_session_state()`/
+  `is_logged_in()`) so a repeatedly-invoked caller (a monitoring job
+  run on a schedule) can skip the full login chain on every run.
+- `EssentialController` - one organization's cloud-hosted Essential
+  Controller - sites, devices, clients, alert counts, dashboard
+  overview, network-check tools. Obtained via
+  `OmadaCloudAccount.essential_controller(org_id)`.
+- `OnPremiseController` - one on-premise hardware controller (e.g. an
+  OC200), reached through TP-Link's Cloud Access proxy rather than
+  directly - sites, devices, clients, alert count, network-check
+  tools. Confirmed live to run the *same* underlying controller
+  software as Essential Controller, just through a different base URL.
+  Obtained via `OmadaCloudAccount.onpremise_controller(device_id)`.
 
-Verified live against a real "Omada Essential" free-tier account (one
-organization, two sites, no MFA). See the module docstrings in
-[src/omada_automata/account.py](src/omada_automata/account.py) and
-[src/omada_automata/essential.py](src/omada_automata/essential.py) for
-exactly what's confirmed vs assumed - in particular, `get_devices()`,
-`get_clients()`, and `get_dashboard_overview()` return raw dicts/lists
+Verified live against a real "Omada Essential" free-tier account (two
+organizations - one cloud-hosted with two sites, one on-premise OC200
+with one site). See the module docstrings in
+[src/omada_automata/account.py](src/omada_automata/account.py),
+[src/omada_automata/essential.py](src/omada_automata/essential.py), and
+[src/omada_automata/onpremise.py](src/omada_automata/onpremise.py) for
+exactly what's confirmed vs assumed - in particular, `get_devices()`
+and `get_clients()` on both controller classes return raw dicts/lists
 rather than parsed dataclasses. Their shapes have now been confirmed
 against a live account, just not yet turned into dataclasses.
 
 Not covered yet: Omada Central (a separate dashboard product also seen
-in the source capture), MFA/2FA-enabled accounts, and any
-state-changing operations (this package is fetch-only).
+in the source capture) and any state-changing operations (this package
+is fetch-only).
 
 ## Install
 
@@ -62,6 +76,20 @@ controller = account.essential_controller(orgs[0].org_id)
 for site in controller.get_sites():
     print(site.name, controller.get_alert_count(site.site_id))
     devices = controller.get_devices(site.site_id)  # raw dict, shape unconfirmed
+```
+
+On-premise controllers (e.g. an OC200) work the same way, just
+discovered/connected differently - no `site_id` needed for alerts or
+devices (not site-scoped there), and no `dashboard overview`:
+```python
+for summary in account.list_onpremise_controllers():
+    controller = account.onpremise_controller(summary.device_id)
+    print(summary.alias, controller.get_alert_count())
+    devices = controller.get_devices()  # raw dict, shape unconfirmed
+
+    for site in controller.get_sites():
+        clients = controller.get_clients(site.site_id)  # raw dict, shape unconfirmed
+        result = controller.ping(site.site_id, ['AA-BB-CC-DD-EE-FF'], dest='8.8.8.8')
 ```
 
 Caching a session across repeated runs (e.g. a monitoring job invoked

@@ -40,6 +40,35 @@ class OrganizationHosts:
 
 
 @dataclasses.dataclass
+class OnPremiseControllerSummary:
+    '''One entry from Cloud Access's cloudaccess/organizations list -
+    an on-premise hardware controller (e.g. an OC200) this account can
+    reach remotely through TP-Link's cloud proxy. Pass `device_id` to
+    OmadaCloudAccount.onpremise_controller() to connect to one.
+    '''
+    device_id: str
+    alias: str
+    status: int
+    device_mac: str
+    device_model: str
+    device_hw_ver: str
+    show_model: str
+    controller_version: str
+    fw_ver: str
+    ip: str
+    sites: int
+    devices: int
+    clients: int
+    alerts: int
+    category: str
+    sn: str
+    app_server_url: str
+    connector_url: str
+    omadac_id: str
+    mfa_status: bool
+
+
+@dataclasses.dataclass
 class Site:
     '''One entry from the Essential Controller's user/sites.'''
     site_id: str

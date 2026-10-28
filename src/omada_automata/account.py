@@ -112,6 +112,39 @@ persist the session (cookies + CSRF token + derived hosts) between
 process runs however they like (file, cache, env var - this module
 doesn't pick for you) and skip login() entirely as long as
 is_logged_in() still says the restored session is valid.
+
+On-premise controllers ("On Premise Systems" in the web UI - hardware
+like an OC200, as opposed to the cloud-hosted Essential Controller
+product "Cloud Based Systems" points at) are a separate product
+reached through a third service, Cloud Access, confirmed live:
+
+    GET {cloud_access_base}/api/v1/cloudaccess/organizations
+    ?filters.deviceType=0&currentPage=1&currentPageSize=20
+    -> {"result": {"data": [{"deviceId", "alias", "deviceModel",
+        "appServerUrl", "connectorUrl", "omadacId", "sites", "devices",
+        "clients", "alerts", ...}, ...]}}
+
+    POST {cloud_access_base}/api/v2/cloudaccess/organizations/{deviceId}/startLaunch
+    {"view": "0", "appServerUrl": <from the listing above>}
+    -> {"result": {"omadacId", "mfaStatus"}}
+
+cloud_access_base isn't handed to the client by any prior response
+either (same situation as cloud_manager_base in step 3 above) - derived
+from this account's own (already-authoritative) cloud_manager_base via
+_guess_cloud_access_base(), following the identical
+use1-api-omada-{product}.tplinkcloud.com pattern confirmed live for
+both. The listing response already includes a connectorUrl and (oddly)
+an omadacId even before startLaunch is called - startLaunch was still
+called every time here to match the web UI's own behavior and because
+it's the step confirmed live to actually establish the controller-
+specific session, but whether skipping it and reusing the listing's own
+omadacId directly would also work wasn't tested.
+
+Once connected, every OnPremiseController call (see onpremise.py) was
+confirmed live to work with this *same* account-level session/CSRF
+token - no additional per-controller login/MFA step, despite
+`mfaStatus` appearing in both responses above (always false in what
+was tested here).
 '''
 from __future__ import annotations
 
@@ -123,6 +156,7 @@ import requests
 
 from . import _envelope, exceptions, models
 from .essential import EssentialController
+from .onpremise import OnPremiseController
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +181,53 @@ def _guess_cloud_manager_base(service_url: str) -> str:
         )
     region = host[: -len(suffix)]
     return f"https://{region}-api-omada-cloud-manager.tplinkcloud.com"
+
+
+def _guess_cloud_access_base(cloud_manager_base: str) -> str:
+    '''Derive Cloud Access's base URL from this account's own (already
+    authoritative) Cloud Manager base - confirmed live that both follow
+    the identical use1-api-omada-{product}.tplinkcloud.com pattern.
+    '''
+    return cloud_manager_base.replace('-api-omada-cloud-manager.', '-api-omada-cloud-access.', 1)
+
+
+def _guess_frontend_origin(cloud_manager_base: str) -> str:
+    '''Derive the regional web app's own origin (what a real browser
+    sends as the WebSocket handshake's Origin header - confirmed live
+    as "https://use1-omada-cloud.tplinkcloud.com" for this account) from
+    Cloud Manager's base. Both Cloud Based and On Premise Systems are
+    served from this same app, just different in-app views, so one
+    derivation covers both - EssentialController instead gets this from
+    get_hosts()'s own redirectUrl field (more directly confirmed, no
+    guessing needed there), but on-premise controllers aren't looked up
+    through that same per-organization hosts endpoint.
+    '''
+    return cloud_manager_base.replace('-api-omada-cloud-manager.', '-omada-cloud.', 1)
+
+
+def _parse_onpremise_controller(data: dict) -> models.OnPremiseControllerSummary:
+    return models.OnPremiseControllerSummary(
+        device_id=data['deviceId'],
+        alias=data.get('alias', ''),
+        status=data.get('status', 0),
+        device_mac=data.get('deviceMac', ''),
+        device_model=data.get('deviceModel', ''),
+        device_hw_ver=data.get('deviceHwVer', ''),
+        show_model=data.get('showModel', ''),
+        controller_version=data.get('controllerVersion', ''),
+        fw_ver=data.get('fwVer', ''),
+        ip=data.get('ip', ''),
+        sites=data.get('sites', 0),
+        devices=data.get('devices', 0),
+        clients=data.get('clients', 0),
+        alerts=data.get('alerts', 0),
+        category=data.get('category', ''),
+        sn=data.get('sn', ''),
+        app_server_url=data.get('appServerUrl', ''),
+        connector_url=data.get('connectorUrl', ''),
+        omadac_id=data.get('omadacId', ''),
+        mfa_status=data.get('mfaStatus', False),
+    )
 
 
 def _parse_redirect_fragment(location: str) -> dict[str, str]:
@@ -585,5 +666,63 @@ class OmadaCloudAccount:
             base_url=hosts.essential,
             csrf_token=self._csrf_token,
             frontend_origin=hosts.redirect_url,
+            timeout=self._timeout,
+        )
+
+    def list_onpremise_controllers(self) -> list[models.OnPremiseControllerSummary]:
+        '''List on-premise hardware controllers (e.g. an OC200) this
+        account can reach remotely through TP-Link's Cloud Access proxy
+        - confirmed live (api/v1/cloudaccess/organizations,
+        filters.deviceType=0 = hardware controllers; other values for
+        that filter are unconfirmed).
+        '''
+        cloud_access_base = _guess_cloud_access_base(self._cloud_manager_base)
+        resp = self._session.get(
+            f'{cloud_access_base}/api/v1/cloudaccess/organizations',
+            params={'filters.deviceType': 0, 'currentPage': 1, 'currentPageSize': 100},
+            headers=self._headers(),
+            timeout=self._timeout,
+        )
+        result = _envelope.unwrap(resp, 'cloudaccess/organizations')
+        return [_parse_onpremise_controller(c) for c in result.get('data', [])]
+
+    def onpremise_controller(self, device_id: str) -> OnPremiseController:
+        '''Get an OnPremiseController bound to one on-premise
+        controller - looks it up via list_onpremise_controllers() to
+        get its appServerUrl/connectorUrl, then calls Cloud Access's
+        startLaunch (confirmed live) to establish a session for it,
+        reusing this account's own session/CSRF token (confirmed live
+        to be the exact same one Cloud Manager/Essential Controller
+        use - no separate per-controller login).
+
+        Raises:
+            exceptions.ApiError: No controller with this device_id is
+                visible to this account, or startLaunch rejected the
+                connection.
+        '''
+        controllers = {c.device_id: c for c in self.list_onpremise_controllers()}
+        summary = controllers.get(device_id)
+        if summary is None:
+            raise exceptions.ApiError(
+                -1, f"No on-premise controller with device_id {device_id}",
+                'cloudaccess/organizations',
+            )
+
+        cloud_access_base = _guess_cloud_access_base(self._cloud_manager_base)
+        resp = self._session.post(
+            f'{cloud_access_base}/api/v2/cloudaccess/organizations/{device_id}/startLaunch',
+            json={'view': '0', 'appServerUrl': summary.app_server_url},
+            headers=self._headers(),
+            timeout=self._timeout,
+        )
+        result = _envelope.unwrap(resp, 'startLaunch')
+
+        return OnPremiseController(
+            session=self._session,
+            device_id=device_id,
+            omadac_id=result['omadacId'],
+            connector_base=f"{summary.connector_url}/omadac/{device_id}",
+            csrf_token=self._csrf_token,
+            frontend_origin=_guess_frontend_origin(self._cloud_manager_base),
             timeout=self._timeout,
         )
