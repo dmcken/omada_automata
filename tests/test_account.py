@@ -550,7 +550,7 @@ class TestSessionState:
         json.dumps(account.get_session_state())  # must not raise
 
 
-_ONPREM_DEVICE_ID = '15F38835C91D9BECBDCBB3ADFA4019AE65E890E8'
+_ONPREM_DEVICE_ID = '0000000000000000000000000000000000000000'
 _ONPREM_CONNECTOR_URL = 'https://use1-api-omada-controller-connector.tplinkcloud.com'
 
 
@@ -574,7 +574,7 @@ class TestListOnpremiseControllers:
         assert controller.clients == 5
         assert controller.alerts == 1
         assert controller.connector_url == _ONPREM_CONNECTOR_URL
-        assert controller.omadac_id == 'ca492293b47ebc7e8254dc25e95a4596'
+        assert controller.omadac_id == 'fake-omadac-id-0000000000000000'
 
     def test_sends_device_type_zero_filter(self, requests_mock, load_json):
         requests_mock.get(
@@ -600,14 +600,14 @@ class TestOnpremiseController:
             f'/api/v2/cloudaccess/organizations/{_ONPREM_DEVICE_ID}/startLaunch',
             json={
                 'errorCode': 0, 'msg': 'Success.',
-                'result': {'omadacId': 'ca492293b47ebc7e8254dc25e95a4596', 'mfaStatus': False},
+                'result': {'omadacId': 'fake-omadac-id-0000000000000000', 'mfaStatus': False},
             },
         )
         account = _LoggedInAccount()
 
         controller = account.onpremise_controller(_ONPREM_DEVICE_ID)
 
-        assert controller._omadac_id == 'ca492293b47ebc7e8254dc25e95a4596'
+        assert controller._omadac_id == 'fake-omadac-id-0000000000000000'
         assert controller._base_url == f'{_ONPREM_CONNECTOR_URL}/omadac/{_ONPREM_DEVICE_ID}'
         assert controller._csrf_token == 'fake-csrf-token'
         assert controller._frontend_origin == 'https://use1-omada-cloud.tplinkcloud.com'

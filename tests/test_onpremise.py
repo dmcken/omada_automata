@@ -12,11 +12,11 @@ from omada_automata.onpremise import OnPremiseController
 
 BASE_URL = (
     'https://use1-api-omada-controller-connector.tplinkcloud.com'
-    '/omadac/15F38835C91D9BECBDCBB3ADFA4019AE65E890E8'
+    '/omadac/0000000000000000000000000000000000000000'
 )
-OMADAC_ID = 'ca492293b47ebc7e8254dc25e95a4596'
-SITE_ID = '69a669f72dac29320109472a'
-DEVICE_MAC = '50-3D-D1-F8-50-07'
+OMADAC_ID = 'fake-omadac-id-0000000000000000'
+SITE_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa'
+DEVICE_MAC = 'AA-BB-CC-DD-EE-FF'
 _FIXED_UUID = uuid.UUID('11111111-1111-1111-1111-111111111111')
 _FIXED_NID = _FIXED_UUID.hex
 
@@ -28,7 +28,7 @@ def _b64(text: str) -> str:
 def _controller():
     return OnPremiseController(
         session=requests.Session(),
-        device_id='15F38835C91D9BECBDCBB3ADFA4019AE65E890E8',
+        device_id='0000000000000000000000000000000000000000',
         omadac_id=OMADAC_ID,
         connector_base=BASE_URL,
         csrf_token='fake-csrf-token',
